@@ -1,0 +1,9 @@
+[project]
+name = "m42-evaluation-api"
+version = "1.0.0"
+description = "M42 CPG Report Evaluation API — LLM-as-judge for clinical practice guideline reports"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
