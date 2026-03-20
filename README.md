@@ -376,11 +376,13 @@ SEARCH_SERVICE_NAME="your-search-service"
 
 ### Step 2 — Build and push the container image to ACR
 
-This builds the Docker image directly in Azure Container Registry (no local Docker required):
+Build the Docker image locally and push it to Azure Container Registry:
 
 ```bash
 cd m42-evaluation-api
-az acr build --registry $ACR_NAME --image m42-evaluation-api:latest .
+docker build -t $IMAGE_TAG .
+az acr login --name $ACR_NAME
+docker push $IMAGE_TAG
 ```
 
 ### Step 3 — Enable ACR admin access (if not already enabled)
@@ -509,10 +511,12 @@ curl "https://$FQDN/health"
 
 ### Updating the deployment
 
-After code changes, rebuild the image and update the Container App:
+After code changes, rebuild the image locally, push to ACR, and update the Container App:
 
 ```bash
-az acr build --registry $ACR_NAME --image m42-evaluation-api:latest .
+docker build -t $IMAGE_TAG .
+az acr login --name $ACR_NAME
+docker push $IMAGE_TAG
 
 az containerapp update \
   --name $ACA_NAME \
