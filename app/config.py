@@ -19,11 +19,15 @@ class Settings(BaseSettings):
     # Azure Blob Storage
     blob_account_url: str = ""
     blob_container_name: str = "evaluation-reports"
+    blob_json_container_name: str = "cpg-report-json"
+
+    # Azure Document Intelligence
+    document_intelligence_endpoint: str = ""
 
     # App Settings
-    default_num_eval_runs: int = 3
     default_evaluation_model: str = "gpt-4o"
     log_level: str = "INFO"
+    use_section_mode: bool = True
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

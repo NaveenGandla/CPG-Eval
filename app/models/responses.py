@@ -30,24 +30,20 @@ class EvaluationResponse(BaseModel):
     report_id: str
     evaluation_id: str
     timestamp: str
-    model_used: str
+    evaluation_model: str
     num_runs: int
+    metrics_evaluated: list[str]
 
-    # Metric scores (aggregated via majority voting / median)
-    clinical_accuracy: MetricResult
-    completeness: MetricResult
-    safety_completeness: SafetyMetricResult
-    relevance: MetricResult
-    coherence: MetricResult
-    evidence_traceability: TraceabilityMetricResult
-    hallucination_score: MetricResult
-    fih_detected: list[FIHItem]
+    # Metric scores — None when the metric was not requested
+    clinical_accuracy: MetricResult | None = None
+    completeness: MetricResult | None = None
+    safety_completeness: SafetyMetricResult | None = None
+    relevance: MetricResult | None = None
+    coherence: MetricResult | None = None
+    evidence_traceability: TraceabilityMetricResult | None = None
+    hallucination_score: MetricResult | None = None
+    fih_detected: list[FIHItem] | None = None
 
-    # Aggregate
-    overall_score: float = Field(
-        ..., ge=0, le=100, description="0-100 weighted score"
-    )
-    usable_without_editing: bool
     confidence_level: Literal["high", "medium", "low"]
     flags: list[str]
 
@@ -62,8 +58,18 @@ class EvaluationResponse(BaseModel):
                     "report_id": "rpt-001",
                     "evaluation_id": "eval-abc-123",
                     "timestamp": "2025-01-15T10:30:00Z",
-                    "model_used": "gpt-4o",
-                    "num_runs": 3,
+                    "evaluation_model": "gpt-4o",
+                    "num_runs": 1,
+                    "metrics_evaluated": [
+                        "clinical_accuracy",
+                        "completeness",
+                        "safety_completeness",
+                        "relevance",
+                        "coherence",
+                        "evidence_traceability",
+                        "hallucination_score",
+                        "fih_detected",
+                    ],
                     "clinical_accuracy": {
                         "score": 4,
                         "confidence": "high",
@@ -102,9 +108,7 @@ class EvaluationResponse(BaseModel):
                         "reasoning": "Minor statistical rounding.",
                     },
                     "fih_detected": [],
-                    "overall_score": 78.5,
-                    "usable_without_editing": False,
-                    "confidence_level": "medium",
+                    "confidence_level": "high",
                     "flags": ["missing_safety_data"],
                     "cosmos_document_id": "eval-abc-123",
                     "blob_url": "https://account.blob.core.windows.net/evaluation-reports/rpt-001/eval-abc-123.json",
@@ -112,3 +116,54 @@ class EvaluationResponse(BaseModel):
             ]
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Section-level evaluation response models
+# ---------------------------------------------------------------------------
+
+
+class SectionScore(BaseModel):
+    """Evaluation scores for a single section."""
+
+    section_id: str
+    section_title: str
+    section_type: str
+
+    clinical_accuracy: MetricResult | None = None
+    completeness: MetricResult | None = None
+    safety_completeness: SafetyMetricResult | None = None
+    relevance: MetricResult | None = None
+    coherence: MetricResult | None = None
+    evidence_traceability: TraceabilityMetricResult | None = None
+    hallucination_score: MetricResult | None = None
+    fih_detected: list[FIHItem] | None = None
+
+    flags: list[str] = []
+
+
+class SectionEvaluationResponse(BaseModel):
+    """Response for section-wise evaluation."""
+
+    report_id: str
+    evaluation_id: str
+    timestamp: str
+    evaluation_model: str
+    metrics_evaluated: list[str]
+
+    # Aggregated final scores across all sections
+    final_scores: dict[str, float] = Field(
+        default_factory=dict,
+        description="Aggregated metric scores across all sections",
+    )
+
+    section_scores: list[SectionScore] = Field(
+        default_factory=list,
+        description="Per-section evaluation results",
+    )
+
+    confidence_level: Literal["high", "medium", "low"]
+    flags: list[str]
+
+    cosmos_document_id: str
+    blob_url: str | None = None

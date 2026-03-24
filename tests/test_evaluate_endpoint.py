@@ -20,16 +20,8 @@ def valid_payload() -> dict:
     return {
         "report_id": "rpt-001",
         "generated_report": "This report discusses treatment options for MM.",
-        "retrieved_chunks": [
-            {
-                "chunk_id": "c1",
-                "text": "The GRIFFIN trial showed D-VRd is effective.",
-                "metadata": {"study_name": "GRIFFIN", "year": 2023},
-            }
-        ],
         "guideline_topic": "First-line treatment for NDMM",
         "disease_context": "Multiple Myeloma",
-        "num_eval_runs": 1,
     }
 
 
@@ -39,8 +31,18 @@ def mock_evaluation_response() -> EvaluationResponse:
         report_id="rpt-001",
         evaluation_id="eval-123",
         timestamp="2025-01-15T10:30:00Z",
-        model_used="gpt-4o",
+        evaluation_model="gpt-4o",
         num_runs=1,
+        metrics_evaluated=[
+            "clinical_accuracy",
+            "completeness",
+            "safety_completeness",
+            "relevance",
+            "coherence",
+            "evidence_traceability",
+            "hallucination_score",
+            "fih_detected",
+        ],
         clinical_accuracy=MetricResult(
             score=4, confidence="high", reasoning="Good"
         ),
@@ -63,9 +65,7 @@ def mock_evaluation_response() -> EvaluationResponse:
             score=3, confidence="high", reasoning="Clean"
         ),
         fih_detected=[],
-        overall_score=72.5,
-        usable_without_editing=False,
-        confidence_level="medium",
+        confidence_level="high",
         flags=[],
         cosmos_document_id="eval-123",
         blob_url=None,
@@ -87,8 +87,23 @@ class TestEvaluateEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["report_id"] == "rpt-001"
-        assert "overall_score" in data
         assert "clinical_accuracy" in data
+        assert "metrics_evaluated" in data
+
+    @patch("app.routers.evaluate.run_evaluation")
+    async def test_valid_request_with_selected_metrics(
+        self, mock_run, valid_payload, mock_evaluation_response
+    ):
+        """User can select a subset of metrics."""
+        payload = valid_payload.copy()
+        payload["metrics"] = ["clinical_accuracy", "hallucination_score"]
+        mock_run.return_value = mock_evaluation_response
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/api/v1/evaluate", json=payload)
+
+        assert response.status_code == 200
 
     async def test_missing_report(self, valid_payload):
         payload = valid_payload.copy()
@@ -98,7 +113,7 @@ class TestEvaluateEndpoint:
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post("/api/v1/evaluate", json=payload)
 
-        assert response.status_code == 422  # Validation error
+        assert response.status_code == 422
 
     async def test_empty_report(self, valid_payload):
         payload = valid_payload.copy()
@@ -110,9 +125,9 @@ class TestEvaluateEndpoint:
 
         assert response.status_code == 422
 
-    async def test_empty_chunks(self, valid_payload):
+    async def test_empty_metrics_list(self, valid_payload):
         payload = valid_payload.copy()
-        payload["retrieved_chunks"] = []
+        payload["metrics"] = []
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -120,9 +135,9 @@ class TestEvaluateEndpoint:
 
         assert response.status_code == 422
 
-    async def test_num_eval_runs_out_of_range(self, valid_payload):
+    async def test_invalid_metric_name(self, valid_payload):
         payload = valid_payload.copy()
-        payload["num_eval_runs"] = 10  # max is 7
+        payload["metrics"] = ["clinical_accuracy", "nonexistent_metric"]
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:

@@ -2,11 +2,16 @@
 
 ## Overview
 
-The M42 Evaluation API assesses LLM-generated Clinical Practice Guideline (CPG) reports for clinical accuracy, safety, hallucinations, and evidence traceability using an **LLM-as-judge** pattern with majority voting.
+The M42 Evaluation API assesses LLM-generated Clinical Practice Guideline (CPG) reports for clinical accuracy, safety, hallucinations, and evidence traceability using an **LLM-as-judge** pattern.
 
 **Evaluation approach:**
 - **Metrics** derived from Rubinstein et al. (2025) — clinical evaluation dimensions validated by oncology domain experts
-- **Evaluation method** derived from the MASA framework (Chen et al., 2025) — LLM-as-judge with enhanced guidance prompts, majority voting across multiple independent runs, and structured chain-of-thought reasoning
+- **Evaluation method** derived from the MASA framework (Chen et al., 2025) — LLM-as-judge with enhanced guidance prompts and structured chain-of-thought reasoning
+- **Source evidence** is automatically retrieved from Azure AI Search — callers do not need to provide source chunks
+
+**Two evaluation modes:**
+- **Full-document mode** (`POST /api/v1/evaluate`) — evaluates the entire report as a single unit (original pipeline)
+- **Section-wise mode** (`POST /api/v1/evaluate/sections`) — evaluates each section independently with section-specific retrieval, then aggregates scores
 
 ## Architecture
 
@@ -14,32 +19,35 @@ The M42 Evaluation API assesses LLM-generated Clinical Practice Guideline (CPG) 
 Client (M42 Pipeline)
     │
     ▼
-┌──────────────────────────────────┐
-│   FastAPI (Azure Container App)  │
-│                                  │
-│   POST /api/v1/evaluate          │
-│                                  │
-│   ┌────────────────────────────┐ │
-│   │   Evaluation Engine        │ │
-│   │                            │ │
-│   │   Run 1 ─┐                 │ │
-│   │   Run 2 ─┼─► Aggregate    │ │     ┌──────────────────┐
-│   │   Run 3 ─┘   (median +    │ │────►│ Azure Cosmos DB  │
-│   │               majority)    │ │     │ (evaluations)    │
-│   └────────────────────────────┘ │     └──────────────────┘
-│              │                   │
-│              ▼                   │     ┌──────────────────┐
-│   ┌────────────────────────────┐ │────►│ Azure Blob Store │
-│   │   Azure OpenAI (GPT-4o)   │ │     │ (full reports)   │
-│   │   LLM Judge                │ │     └──────────────────┘
-│   └────────────────────────────┘ │
-│              │                   │     ┌──────────────────┐
-│              ▼                   │────►│ Azure AI Search  │
-│   ┌────────────────────────────┐ │     │ (source chunks)  │
-│   │   Enhanced Guidance Prompt │ │     └──────────────────┘
-│   │   + Chain-of-Thought       │ │
-│   └────────────────────────────┘ │
-└──────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│   FastAPI (Azure Container App)                           │
+│                                                           │
+│   POST /api/v1/evaluate           (full-document mode)    │
+│   POST /api/v1/evaluate/sections  (section-wise mode)     │
+│                                                           │
+│   ┌─────────────────────────────────────────────────────┐ │
+│   │  Section-Wise Pipeline                              │ │
+│   │                                                     │ │
+│   │  1. Resolve input (JSON / Blob / PDF+DOCX)         │ │
+│   │  2. Per-section retrieval from Azure AI Search      │ │     ┌────────────────────┐
+│   │  3. Per-section LLM judge evaluation                │ │────►│ Azure AI Search    │
+│   │  4. Aggregate section scores                        │ │     │ (source chunks)    │
+│   └─────────────────────────────────────────────────────┘ │     └────────────────────┘
+│                                                           │
+│   ┌─────────────────────────────────────────────────────┐ │     ┌────────────────────┐
+│   │  Full-Document Pipeline                             │ │────►│ Azure Cosmos DB    │
+│   │                                                     │ │     │ (evaluations)      │
+│   │  1. Retrieve chunks from Azure AI Search            │ │     └────────────────────┘
+│   │  2. Build evaluation prompt with evidence           │ │
+│   │  3. Run LLM judge                                   │ │     ┌────────────────────┐
+│   └─────────────────────────────────────────────────────┘ │────►│ Azure Blob Storage │
+│                                                           │     │ (reports + JSON)   │
+│   ┌─────────────────────────────────────────────────────┐ │     └────────────────────┘
+│   │  Azure OpenAI (GPT-4o) — LLM Judge                 │ │
+│   │  + Enhanced Guidance Prompts + Chain-of-Thought     │ │     ┌────────────────────┐
+│   └─────────────────────────────────────────────────────┘ │────►│ Azure Doc Intel    │
+│                                                           │     │ (PDF/DOCX extract) │
+└───────────────────────────────────────────────────────────┘     └────────────────────┘
 ```
 
 ## Azure Services Used
@@ -50,8 +58,9 @@ All services are **pre-provisioned**. The application does NOT create or provisi
 |---------|---------|-------------|
 | Azure OpenAI (GPT-4o) | LLM judge for evaluation | Managed Identity (`DefaultAzureCredential`) |
 | Azure Cosmos DB (NoSQL) | Store evaluation results | Managed Identity |
-| Azure AI Search | Retrieve/enrich source chunks | Managed Identity |
-| Azure Blob Storage | Store full evaluation report JSONs | Managed Identity |
+| Azure AI Search | Automatically retrieve source evidence chunks | Managed Identity |
+| Azure Blob Storage | Store evaluation reports and structured JSON | Managed Identity |
+| Azure Document Intelligence | Extract text from PDF/DOCX documents (section-wise mode) | Managed Identity |
 | Azure Container Apps | Hosting the FastAPI application | N/A |
 
 ## Environment Variables
@@ -67,9 +76,13 @@ All services are **pre-provisioned**. The application does NOT create or provisi
 | `SEARCH_ENDPOINT` | Yes | — | `https://<service>.search.windows.net` |
 | `SEARCH_INDEX_NAME` | No | `cpg-sources` | Index name |
 | `BLOB_ACCOUNT_URL` | Yes | — | `https://<account>.blob.core.windows.net` |
-| `BLOB_CONTAINER_NAME` | No | `evaluation-reports` | Blob container name |
-| `DEFAULT_NUM_EVAL_RUNS` | No | `3` | Default number of independent evaluation runs |
+| `BLOB_CONTAINER_NAME` | No | `evaluation-reports` | Blob container for evaluation reports |
+| `BLOB_JSON_CONTAINER_NAME` | No | `cpg-report-json` | Blob container for structured report JSON |
+| `DOCUMENT_INTELLIGENCE_ENDPOINT` | No* | — | `https://<resource>.cognitiveservices.azure.com/` |
+| `USE_SECTION_MODE` | No | `true` | Enable section-wise evaluation pipeline |
 | `LOG_LEVEL` | No | `INFO` | Logging level |
+
+> \* `DOCUMENT_INTELLIGENCE_ENDPOINT` is required only if using section-wise mode with `file_path` input (PDF/DOCX extraction).
 
 ---
 
@@ -77,7 +90,16 @@ All services are **pre-provisioned**. The application does NOT create or provisi
 
 ### `POST /api/v1/evaluate`
 
-Evaluate a single CPG report across 8 clinical dimensions.
+Evaluate a single CPG report across selected clinical dimensions (up to 8) using the full-document pipeline. Users can choose which metrics to evaluate via the `metrics` field.
+
+### `POST /api/v1/evaluate/sections`
+
+Evaluate a CPG report using section-wise evaluation. Accepts three input modes:
+- **Inline JSON** (`report_json`) — pre-structured sections
+- **Blob JSON path** (`json_path`) — load structured JSON from Azure Blob Storage
+- **File path** (`file_path`) — extract from PDF/DOCX via Azure Document Intelligence
+
+Each section is evaluated independently with section-specific retrieval, then scores are aggregated.
 
 ### `GET /api/v1/evaluate/{evaluation_id}`
 
@@ -101,33 +123,12 @@ Health check. Returns `{"status": "healthy", "version": "1.0.0"}`.
 {
   "report_id": "rpt-20250319-ndmm-001",
   "generated_report": "Daratumumab combined with lenalidomide, bortezomib, and dexamethasone (Dara-VRd) has emerged as a standard frontline regimen for transplant-eligible newly diagnosed multiple myeloma (NDMM)...",
-  "retrieved_chunks": [
-    {
-      "chunk_id": "chunk-001",
-      "text": "The PERSEUS trial (Sonneveld et al., NEJM 2024) demonstrated that Dara-VRd significantly improved progression-free survival compared to VRd alone in transplant-eligible NDMM patients...",
-      "metadata": {
-        "study_name": "PERSEUS",
-        "year": 2024,
-        "journal": "New England Journal of Medicine",
-        "authors": "Sonneveld P, Dimopoulos MA, Boccadoro M, et al."
-      }
-    },
-    {
-      "chunk_id": "chunk-002",
-      "text": "The GRIFFIN trial (Chari et al., Blood Cancer J 2024) evaluated Dara-VRd in transplant-eligible NDMM...",
-      "metadata": {
-        "study_name": "GRIFFIN",
-        "year": 2024,
-        "journal": "Blood Cancer Journal",
-        "authors": "Chari A, Kaufman JL, Laubach J, et al."
-      }
-    }
-  ],
   "guideline_topic": "First-line treatment with Dara-VRd for transplant-eligible newly diagnosed multiple myeloma",
   "disease_context": "Multiple Myeloma",
+  "model": "gpt-4o",
+  "metrics": ["clinical_accuracy", "safety_completeness", "hallucination_score", "fih_detected"],
   "reference_report": null,
-  "evaluation_model": "gpt-4o",
-  "num_eval_runs": 3
+  "evaluation_model": "gpt-4o"
 }
 ```
 
@@ -137,18 +138,29 @@ Health check. Returns `{"status": "healthy", "version": "1.0.0"}`.
 |-------|------|----------|-------------------------------|-------------|
 | `report_id` | string | **Yes** | Any unique string (e.g., UUID, slug) | Unique identifier for the CPG report being evaluated |
 | `generated_report` | string | **Yes** | Non-empty string, no max length | Full text of the LLM-generated CPG report |
-| `retrieved_chunks` | list[SourceChunk] | **Yes** | Min 1 chunk required | Source evidence chunks from Azure AI Search used during report generation |
-| `retrieved_chunks[].chunk_id` | string | **Yes** | Any unique string | Identifier for the chunk |
-| `retrieved_chunks[].text` | string | **Yes** | Non-empty string | Full text content of the chunk |
-| `retrieved_chunks[].metadata.study_name` | string | No | Any string or `null` | Name of the clinical trial or study |
-| `retrieved_chunks[].metadata.year` | int | No | 1900–2030 or `null` | Publication year |
-| `retrieved_chunks[].metadata.journal` | string | No | Any string or `null` | Journal name |
-| `retrieved_chunks[].metadata.authors` | string | No | Any string or `null` | Author list |
 | `guideline_topic` | string | **Yes** | Non-empty string | The clinical question or CPG topic |
 | `disease_context` | string | **Yes** | Non-empty string (e.g., `"Multiple Myeloma"`, `"Type 2 Diabetes"`, `"AL Amyloidosis"`) | Disease area for context |
+| `model` | string | **Yes** | e.g., `"gpt-4o"`, `"gpt-5.1"`, `"gpt-4o-mini"` | Model used to generate the CPG report |
+| `metrics` | list[string] | No | See table below. Min 1 required. Defaults to all 8 metrics | Which evaluation dimensions to run. Multi-select from frontend dropdown |
 | `reference_report` | string | No | Any string or `null` | Gold-standard manually curated report for comparison (future use) |
 | `evaluation_model` | string | No | `"gpt-4o"` (default), or any valid Azure OpenAI deployment name | LLM model used as judge |
-| `num_eval_runs` | int | No | `1` to `7`, default `3` | Number of independent evaluation runs for majority voting |
+
+### Available Metrics
+
+| Metric Name | Type | Description |
+|-------------|------|-------------|
+| `clinical_accuracy` | Likert 1-5 | Are drug names, dosages, trial outcomes factually correct? |
+| `completeness` | Likert 1-5 | Does the report cover all critical aspects from source evidence? |
+| `safety_completeness` | Likert 1-5 | Are adverse effects, contraindications, dose modifications covered? |
+| `relevance` | Likert 1-5 | Is all information directly pertinent to the guideline topic? |
+| `coherence` | Likert 1-5 | Is the report logically structured and readable? |
+| `evidence_traceability` | Likert 1-5 | Can every claim be traced back to a source chunk? |
+| `hallucination_score` | Ordinal 1-4 | Does the report contain fabricated or contradictory claims? |
+| `fih_detected` | List | Specific factually incorrect hallucinations with severity |
+
+> **Note:** Source evidence chunks are automatically retrieved from Azure AI Search based on the `guideline_topic` and `disease_context`. You do not need to provide them in the request.
+>
+> **Note:** When a subset of metrics is selected, only those metrics appear in the response. Non-selected metrics are `null`.
 
 ---
 
@@ -161,8 +173,10 @@ Health check. Returns `{"status": "healthy", "version": "1.0.0"}`.
   "report_id": "rpt-20250319-ndmm-001",
   "evaluation_id": "eval-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "timestamp": "2025-03-19T14:30:00.000Z",
-  "model_used": "gpt-4o",
-  "num_runs": 3,
+  "generation_model": "gpt-4o",
+  "evaluation_model": "gpt-4o",
+  "num_runs": 1,
+  "metrics_evaluated": ["clinical_accuracy", "completeness", "safety_completeness", "relevance", "coherence", "evidence_traceability", "hallucination_score", "fih_detected"],
 
   "clinical_accuracy": {
     "score": 4,
@@ -225,9 +239,7 @@ Health check. Returns `{"status": "healthy", "version": "1.0.0"}`.
     }
   ],
 
-  "overall_score": 68.75,
-  "usable_without_editing": false,
-  "confidence_level": "medium",
+  "confidence_level": "high",
   "flags": [
     "missing_safety_data",
     "untraced_claims_detected"
@@ -245,8 +257,11 @@ Health check. Returns `{"status": "healthy", "version": "1.0.0"}`.
 | `report_id` | string | Echo of input | Report identifier |
 | `evaluation_id` | string | UUID v4 | Unique evaluation identifier |
 | `timestamp` | string | ISO 8601 | Evaluation timestamp |
-| `model_used` | string | `"gpt-4o"` or deployment name | LLM judge model used |
-| `num_runs` | int | 1–7 | Number of evaluation runs performed |
+| `generation_model` | string | e.g., `"gpt-4o"`, `"gpt-5.1"` | Model used to generate the CPG report |
+| `evaluation_model` | string | `"gpt-4o"` or deployment name | LLM judge model used for evaluation |
+| `num_runs` | int | Always `1` | Number of evaluation runs performed |
+| `metrics_evaluated` | list[str] | Subset of 8 metric names | Which metrics were evaluated in this run |
+| `clinical_accuracy` | object or null | See below, or `null` if not selected | Clinical accuracy metric result |
 | `clinical_accuracy.score` | int | `1`, `2`, `3`, `4`, `5` | 1=pervasive inaccuracies, 5=all facts correct |
 | `completeness.score` | int | `1`, `2`, `3`, `4`, `5` | 1=majority missing, 5=all critical info included |
 | `safety_completeness.score` | int | `1`, `2`, `3`, `4`, `5` | 1=absent/dangerous, 5=comprehensive with AE rates |
@@ -261,9 +276,7 @@ Health check. Returns `{"status": "healthy", "version": "1.0.0"}`.
 | `fih_detected[].source_says` | string | Evidence text | What the source actually states |
 | `fih_detected[].severity` | string | `"critical"`, `"major"`, `"minor"` | Impact on patient safety |
 | `fih_detected[].location` | string | e.g., `"paragraph 2"` | Where in the report |
-| `overall_score` | float | `0.00` – `100.00` | Weighted aggregate score |
-| `usable_without_editing` | bool | `true`, `false` | `true` if score >= 80 and no critical FIH |
-| `confidence_level` | string | `"high"`, `"medium"`, `"low"` | Agreement level across evaluation runs |
+| `confidence_level` | string | `"high"` | Always high (single run) |
 | `flags` | list[str] | See below | Critical issues detected |
 
 ### Possible Flag Values
@@ -271,51 +284,165 @@ Health check. Returns `{"status": "healthy", "version": "1.0.0"}`.
 | Flag | Trigger Condition |
 |------|-------------------|
 | `missing_safety_data` | `safety_completeness.score <= 2` |
-| `hallucinated_citation` | Any FIH with severity `"critical"` or `"major"` |
-| `low_accuracy` | `clinical_accuracy.score <= 2` |
-| `untraced_claims_detected` | `evidence_traceability.untraced_claims` is non-empty |
-| `low_confidence` | `confidence_level == "low"` |
-| `many_hallucinations` | `hallucination_score.score <= 2` |
-| `incomplete_report` | `completeness.score <= 2` |
+| `safety_gaps_identified` | `safety_completeness.missing_items` is non-empty |
+| `poor_evidence_traceability` | `evidence_traceability.score <= 2` |
+| `untraced_claims_present` | `evidence_traceability.untraced_claims` is non-empty |
+| `hallucinations_detected` | `hallucination_score.score <= 2` |
+| `critical_fih_detected` | Any FIH with `severity == "critical"` |
+| `fih_present` | Any FIH detected |
+| `low_clinical_accuracy` | `clinical_accuracy.score <= 2` |
 
 ### Error Responses
 
 | Status | Body | Condition |
 |--------|------|-----------|
-| `400` | `{"detail": "generated_report cannot be empty"}` | Validation error |
-| `400` | `{"detail": "retrieved_chunks must contain at least 1 chunk"}` | No source chunks |
-| `500` | `{"detail": "Evaluation engine failed: <reason>"}` | Azure service error |
-| `503` | `{"detail": "Azure OpenAI service throttled, retry after <N> seconds"}` | Rate limiting |
+| `422` | Validation error details | Missing required fields or empty report |
+| `500` | `{"detail": "Evaluation failed: <reason>"}` | Azure service error or no chunks retrieved |
+| `503` | `{"detail": "Azure OpenAI service is throttled. Please retry later."}` | Rate limiting |
 
 ---
 
-## Scoring Weights
+## Section-Wise Evaluation
 
-| Metric | Weight | Justification |
-|--------|--------|---------------|
-| Clinical Accuracy | 25% | Highest clinical impact — wrong information is dangerous |
-| Safety Completeness | 20% | LLMs systematically under-report safety data (Rubinstein 2025) |
-| Evidence Traceability | 20% | Core RAG requirement — every claim needs a verifiable source |
-| Hallucination Score | 15% | Fabricated content destroys trust and can harm patients |
-| Completeness | 10% | Important but less critical than accuracy |
-| Relevance | 5% | LLMs generally perform well on relevance |
-| Coherence | 5% | LLMs generally perform well on coherence |
+### `POST /api/v1/evaluate/sections`
 
-**Formula:** `overall_score = Σ(normalized_metric_score × weight) × 100`
+### Input Payload
 
-- Likert 1–5 normalized: `(score - 1) / 4` → range 0.0 to 1.0
-- Hallucination 1–4 normalized: `(score - 1) / 3` → range 0.0 to 1.0
+The section-wise endpoint accepts three input modes. Provide exactly one of `report_json`, `json_path`, or `file_path`.
 
----
+#### Mode A — Inline JSON (preferred)
 
-## Routing Thresholds
+```json
+{
+  "guideline_topic": "First-line treatment for transplant-eligible NDMM",
+  "disease_context": "Multiple Myeloma",
+  "metrics": ["clinical_accuracy", "safety_completeness", "hallucination_score", "fih_detected"],
+  "evaluation_model": "gpt-4o",
+  "report_json": {
+    "report_id": "rpt-001",
+    "sections": [
+      {
+        "id": "sec-1",
+        "title": "Introduction",
+        "content": "This guideline covers first-line treatment options for NDMM...",
+        "section_type": "general",
+        "order": 0,
+        "keywords": ["NDMM", "treatment", "first-line"]
+      },
+      {
+        "id": "sec-2",
+        "title": "Treatment Recommendations",
+        "content": "D-VRd is recommended as first-line therapy...",
+        "section_type": "guideline",
+        "order": 1,
+        "keywords": ["D-VRd", "GRIFFIN", "therapy"]
+      }
+    ]
+  }
+}
+```
 
-| Condition | Action |
-|-----------|--------|
-| `overall_score >= 80` AND `fih_detected` is empty AND `usable_without_editing == true` | Auto-approve report |
-| `overall_score >= 60` AND no critical flags | Route to expert for light review |
-| `overall_score < 60` OR critical flags present | Route to expert for full review + consider regeneration |
-| `hallucination_score <= 2` OR any FIH with `severity == "critical"` | **Block report**, trigger regeneration |
+#### Mode A — Blob JSON Path
+
+```json
+{
+  "guideline_topic": "First-line treatment for transplant-eligible NDMM",
+  "disease_context": "Multiple Myeloma",
+  "json_path": "cpg-report-json/rpt-001.json"
+}
+```
+
+#### Mode B — Raw Document (PDF/DOCX)
+
+```json
+{
+  "guideline_topic": "First-line treatment for transplant-eligible NDMM",
+  "disease_context": "Multiple Myeloma",
+  "file_path": "https://<account>.blob.core.windows.net/documents/report.pdf"
+}
+```
+
+When using `file_path`, the document is processed via Azure Document Intelligence (`prebuilt-layout`) to extract paragraphs, headings, and tables. Sections are automatically detected using heading heuristics (DI role metadata, numbered headers, ALL CAPS lines, short title lines) with a fallback to paragraph chunking.
+
+### Section JSON Schema
+
+```json
+{
+  "report_id": "string",
+  "sections": [
+    {
+      "id": "string",
+      "title": "string",
+      "content": "string",
+      "section_type": "string",
+      "order": 0,
+      "keywords": ["string"]
+    }
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `sections[].id` | string | Unique section identifier (UUID) |
+| `sections[].title` | string | Section heading |
+| `sections[].content` | string | Section text content |
+| `sections[].section_type` | string | Inferred type: `definitions`, `abbreviations`, `guideline`, `general` |
+| `sections[].order` | int | Position in the document |
+| `sections[].keywords` | list[str] | Top 5-10 keywords extracted via TF-IDF |
+
+### Section-Wise Output
+
+```json
+{
+  "report_id": "rpt-001",
+  "evaluation_id": "eval-uuid",
+  "timestamp": "2025-03-24T14:30:00Z",
+  "evaluation_model": "gpt-4o",
+  "metrics_evaluated": ["clinical_accuracy", "safety_completeness", "hallucination_score", "fih_detected"],
+
+  "final_scores": {
+    "clinical_accuracy": 3.5,
+    "safety_completeness": 2.5,
+    "hallucination_score": 3.0
+  },
+
+  "section_scores": [
+    {
+      "section_id": "sec-1",
+      "section_title": "Introduction",
+      "section_type": "general",
+      "clinical_accuracy": { "score": 4, "confidence": "high", "reasoning": "..." },
+      "safety_completeness": { "score": 3, "confidence": "medium", "reasoning": "...", "missing_items": [] },
+      "hallucination_score": { "score": 3, "confidence": "high", "reasoning": "..." },
+      "fih_detected": [],
+      "flags": []
+    },
+    {
+      "section_id": "sec-2",
+      "section_title": "Treatment Recommendations",
+      "section_type": "guideline",
+      "clinical_accuracy": { "score": 3, "confidence": "medium", "reasoning": "..." },
+      "safety_completeness": { "score": 2, "confidence": "high", "reasoning": "...", "missing_items": ["AE rates"] },
+      "hallucination_score": { "score": 3, "confidence": "high", "reasoning": "..." },
+      "fih_detected": [],
+      "flags": ["missing_safety_data", "safety_gaps_identified"]
+    }
+  ],
+
+  "confidence_level": "high",
+  "flags": ["missing_safety_data", "safety_gaps_identified"],
+  "cosmos_document_id": "eval-uuid",
+  "blob_url": "https://..."
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `final_scores` | dict[str, float] | Aggregated average scores across all sections (excludes `fih_detected`) |
+| `section_scores` | list[SectionScore] | Per-section evaluation results with individual metrics and flags |
+| `section_scores[].flags` | list[str] | Flags specific to that section |
+| `flags` | list[str] | Deduplicated union of all section flags |
 
 ---
 
@@ -372,6 +499,7 @@ OPENAI_RESOURCE_NAME="your-openai-resource"
 COSMOS_ACCOUNT_NAME="your-cosmos-account"
 STORAGE_ACCOUNT_NAME="your-storage-account"
 SEARCH_SERVICE_NAME="your-search-service"
+DOC_INTEL_RESOURCE_NAME="your-doc-intel-resource"
 ```
 
 ### Step 2 — Build and push the container image to ACR
@@ -385,10 +513,12 @@ az acr login --name $ACR_NAME
 docker push $IMAGE_TAG
 ```
 
-### Step 3 — Enable ACR admin access (if not already enabled)
+### Step 3 — Enable ACR admin access and retrieve credentials
 
 ```bash
 az acr update --name $ACR_NAME --admin-enabled true
+ACR_USERNAME=$(az acr credential show --name $ACR_NAME --query username -o tsv)
+ACR_PASSWORD=$(az acr credential show --name $ACR_NAME --query "passwords[0].value" -o tsv)
 ```
 
 ### Step 4 — Create the Container App
@@ -400,6 +530,8 @@ az containerapp create \
   --environment $ACA_ENV \
   --image $IMAGE_TAG \
   --registry-server "$ACR_NAME.azurecr.io" \
+  --registry-username $ACR_USERNAME \
+  --registry-password $ACR_PASSWORD \
   --target-port 8000 \
   --ingress external \
   --min-replicas 1 \
@@ -417,6 +549,9 @@ az containerapp create \
     SEARCH_INDEX_NAME="cpg-sources" \
     BLOB_ACCOUNT_URL="https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net" \
     BLOB_CONTAINER_NAME="evaluation-reports" \
+    BLOB_JSON_CONTAINER_NAME="cpg-report-json" \
+    DOCUMENT_INTELLIGENCE_ENDPOINT="https://$DOC_INTEL_RESOURCE_NAME.cognitiveservices.azure.com/" \
+    USE_SECTION_MODE="true" \
     LOG_LEVEL="INFO"
 ```
 
@@ -494,6 +629,19 @@ az role assignment create \
   --scope $SEARCH_RESOURCE_ID
 ```
 
+**Azure Document Intelligence — Cognitive Services User** (only if using section-wise mode with PDF/DOCX):
+
+```bash
+DOC_INTEL_RESOURCE_ID=$(az cognitiveservices account show \
+  --name $DOC_INTEL_RESOURCE_NAME --resource-group $RESOURCE_GROUP \
+  --query id -o tsv)
+
+az role assignment create \
+  --assignee $PRINCIPAL_ID \
+  --role "Cognitive Services User" \
+  --scope $DOC_INTEL_RESOURCE_ID
+```
+
 ### Step 8 — Verify the deployment
 
 ```bash
@@ -532,3 +680,4 @@ az containerapp update \
 | Azure Cosmos DB | Cosmos DB Built-in Data Contributor (SQL role) | Account root `/` |
 | Azure Blob Storage | Storage Blob Data Contributor | Storage account |
 | Azure AI Search | Search Index Data Reader | Search service |
+| Azure Document Intelligence | Cognitive Services User | Document Intelligence resource |

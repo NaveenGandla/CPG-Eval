@@ -30,7 +30,7 @@ def sample_chunks() -> list[SourceChunk]:
 
 
 @pytest.fixture
-def sample_request(sample_chunks: list[SourceChunk]) -> EvaluationRequest:
+def sample_request() -> EvaluationRequest:
     return EvaluationRequest(
         report_id="rpt-test-001",
         generated_report=(
@@ -38,16 +38,15 @@ def sample_request(sample_chunks: list[SourceChunk]) -> EvaluationRequest:
             "diagnosed multiple myeloma. The GRIFFIN trial demonstrated that "
             "D-VRd followed by ASCT improved PFS. The ORR was 99%."
         ),
-        retrieved_chunks=sample_chunks,
         guideline_topic="First-line treatment for transplant-eligible NDMM",
         disease_context="Multiple Myeloma",
-        num_eval_runs=3,
+        model="gpt-4o",
     )
 
 
 @pytest.fixture
 def sample_llm_judge_result() -> dict:
-    """A single LLM judge evaluation result."""
+    """A single LLM judge evaluation result (all 8 metrics)."""
     return {
         "clinical_accuracy": {
             "score": 4,

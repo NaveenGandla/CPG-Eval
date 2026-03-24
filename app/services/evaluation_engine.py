@@ -1,63 +1,72 @@
-"""Core evaluation orchestration: majority voting and aggregation."""
+"""Core evaluation orchestration — supports both full-document and section-wise modes."""
 
-import asyncio
 import time
 import uuid
 from datetime import datetime, timezone
 
 import structlog
 
-from app.models.requests import EvaluationRequest
+from app.config import settings
+from app.models.requests import (
+    EvaluationRequest,
+    ReportJSON,
+    SectionEvaluationRequest,
+)
 from app.models.responses import (
     EvaluationResponse,
     FIHItem,
     MetricResult,
     SafetyMetricResult,
+    SectionEvaluationResponse,
+    SectionScore,
     TraceabilityMetricResult,
 )
-from app.prompts.evaluation_prompts import build_user_prompt, format_chunks
+from app.prompts.evaluation_prompts import (
+    build_section_system_prompt,
+    build_section_user_prompt,
+    build_system_prompt,
+    build_user_prompt,
+    format_chunks,
+)
 from app.services import blob_service, cosmos_service
+from app.services.input_resolver import resolve_to_json
 from app.services.llm_judge import call_llm_judge
-from app.utils.bias_mitigation import (
-    aggregate_fih_detections,
-    aggregate_likert_scores,
-    calculate_confidence_level,
-    select_median_run_index,
-)
-from app.utils.scoring import (
-    calculate_overall_score,
-    determine_usable_without_editing,
-    generate_flags,
-)
+from app.services.search_service import enrich_chunks, retrieve_for_section
+from app.utils.scoring import aggregate_section_scores, generate_flags
 
 logger = structlog.get_logger()
-
-LIKERT_METRICS = [
-    "clinical_accuracy",
-    "completeness",
-    "safety_completeness",
-    "relevance",
-    "coherence",
-    "evidence_traceability",
-]
-ORDINAL_METRICS = ["hallucination_score"]
 
 
 async def run_evaluation(request: EvaluationRequest) -> EvaluationResponse:
     """Run the full evaluation pipeline."""
     evaluation_id = str(uuid.uuid4())
     start_time = time.monotonic()
+    selected_metrics = list(request.metrics)
 
     logger.info(
         "evaluation_start",
         report_id=request.report_id,
         evaluation_id=evaluation_id,
-        num_runs=request.num_eval_runs,
-        model=request.evaluation_model,
+        evaluation_model=request.evaluation_model,
+        metrics=selected_metrics,
     )
 
-    # Build prompt
-    formatted_chunks = format_chunks(request.retrieved_chunks)
+    # Retrieve source chunks from Azure AI Search
+    retrieved_chunks = await enrich_chunks(
+        report_id=request.report_id,
+        guideline_topic=request.guideline_topic,
+        disease_context=request.disease_context,
+    )
+
+    if not retrieved_chunks:
+        raise RuntimeError(
+            f"No source chunks retrieved from Azure AI Search for "
+            f"report_id={request.report_id}, topic='{request.guideline_topic}'"
+        )
+
+    # Build prompts — system prompt is tailored to selected metrics
+    system_prompt = build_system_prompt(selected_metrics)
+    formatted_chunks = format_chunks(retrieved_chunks)
     user_prompt = build_user_prompt(
         guideline_topic=request.guideline_topic,
         disease_context=request.disease_context,
@@ -65,71 +74,37 @@ async def run_evaluation(request: EvaluationRequest) -> EvaluationResponse:
         generated_report=request.generated_report,
     )
 
-    # Run N independent evaluations concurrently
-    tasks = [
-        call_llm_judge(
+    # Run a single evaluation
+    try:
+        raw_result = await call_llm_judge(
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             deployment=request.evaluation_model,
             report_id=request.report_id,
-            run_index=i,
+            run_index=0,
         )
-        for i in range(request.num_eval_runs)
-    ]
-    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    # Filter out failed runs
-    successful_runs: list[dict] = []
-    for i, result in enumerate(raw_results):
-        if isinstance(result, Exception):
-            logger.error(
-                "evaluation_run_failed",
-                report_id=request.report_id,
-                evaluation_id=evaluation_id,
-                run_index=i,
-                error=str(result),
-            )
-        else:
-            successful_runs.append(result)
-
-    if not successful_runs:
+    except Exception as e:
+        logger.error(
+            "evaluation_run_failed",
+            report_id=request.report_id,
+            evaluation_id=evaluation_id,
+            error=str(e),
+        )
         raise RuntimeError(
-            f"All {request.num_eval_runs} evaluation runs failed for "
-            f"report_id={request.report_id}"
+            f"Evaluation run failed for report_id={request.report_id}: {e}"
         )
 
-    num_successful = len(successful_runs)
+    # Extract only the selected metrics from the LLM result
+    result = _extract_metrics(raw_result, selected_metrics)
 
-    # Aggregate scores
-    aggregated = _aggregate_runs(successful_runs, num_successful)
-
-    # Calculate overall score
-    overall_score = calculate_overall_score(
-        clinical_accuracy=aggregated["clinical_accuracy"].score,
-        completeness=aggregated["completeness"].score,
-        safety_completeness=aggregated["safety_completeness"].score,
-        relevance=aggregated["relevance"].score,
-        coherence=aggregated["coherence"].score,
-        evidence_traceability=aggregated["evidence_traceability"].score,
-        hallucination_score=aggregated["hallucination_score"].score,
-    )
-
-    usable = determine_usable_without_editing(
-        overall_score, aggregated["fih_detected"]
-    )
-
-    # Confidence level based on run agreement
-    all_run_scores = [
-        {metric: run.get(metric, {}).get("score", 0) for metric in LIKERT_METRICS + ORDINAL_METRICS}
-        for run in successful_runs
-    ]
-    confidence = calculate_confidence_level(all_run_scores)
+    confidence = "high"
 
     flags = generate_flags(
-        safety=aggregated["safety_completeness"],
-        traceability=aggregated["evidence_traceability"],
-        hallucination=aggregated["hallucination_score"],
-        fih_detected=aggregated["fih_detected"],
-        clinical_accuracy=aggregated["clinical_accuracy"],
+        safety=result.get("safety_completeness"),
+        traceability=result.get("evidence_traceability"),
+        hallucination=result.get("hallucination_score"),
+        fih_detected=result.get("fih_detected"),
+        clinical_accuracy=result.get("clinical_accuracy"),
     )
 
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -139,18 +114,17 @@ async def run_evaluation(request: EvaluationRequest) -> EvaluationResponse:
         report_id=request.report_id,
         evaluation_id=evaluation_id,
         timestamp=timestamp,
-        model_used=request.evaluation_model,
-        num_runs=num_successful,
-        clinical_accuracy=aggregated["clinical_accuracy"],
-        completeness=aggregated["completeness"],
-        safety_completeness=aggregated["safety_completeness"],
-        relevance=aggregated["relevance"],
-        coherence=aggregated["coherence"],
-        evidence_traceability=aggregated["evidence_traceability"],
-        hallucination_score=aggregated["hallucination_score"],
-        fih_detected=aggregated["fih_detected"],
-        overall_score=overall_score,
-        usable_without_editing=usable,
+        evaluation_model=request.evaluation_model,
+        num_runs=1,
+        metrics_evaluated=selected_metrics,
+        clinical_accuracy=result.get("clinical_accuracy"),
+        completeness=result.get("completeness"),
+        safety_completeness=result.get("safety_completeness"),
+        relevance=result.get("relevance"),
+        coherence=result.get("coherence"),
+        evidence_traceability=result.get("evidence_traceability"),
+        hallucination_score=result.get("hallucination_score"),
+        fih_detected=result.get("fih_detected"),
         confidence_level=confidence,
         flags=flags,
         cosmos_document_id=evaluation_id,
@@ -159,7 +133,7 @@ async def run_evaluation(request: EvaluationRequest) -> EvaluationResponse:
     # Store in Cosmos DB and Blob Storage
     cosmos_doc = response.model_dump()
     cosmos_doc["id"] = evaluation_id
-    cosmos_doc["_raw_runs"] = successful_runs
+    cosmos_doc["_raw_result"] = raw_result
 
     try:
         await cosmos_service.store_evaluation(cosmos_doc)
@@ -173,7 +147,7 @@ async def run_evaluation(request: EvaluationRequest) -> EvaluationResponse:
     blob_url: str | None = None
     try:
         blob_data = response.model_dump()
-        blob_data["_raw_runs"] = successful_runs
+        blob_data["_raw_result"] = raw_result
         blob_url = await blob_service.store_evaluation_report(
             report_id=request.report_id,
             evaluation_id=evaluation_id,
@@ -192,7 +166,6 @@ async def run_evaluation(request: EvaluationRequest) -> EvaluationResponse:
         "evaluation_complete",
         report_id=request.report_id,
         evaluation_id=evaluation_id,
-        overall_score=overall_score,
         confidence=confidence,
         elapsed_seconds=elapsed,
     )
@@ -200,72 +173,243 @@ async def run_evaluation(request: EvaluationRequest) -> EvaluationResponse:
     return response
 
 
-def _aggregate_runs(runs: list[dict], num_runs: int) -> dict:
-    """Aggregate multiple evaluation runs into final scores."""
-    # Collect scores per metric
-    likert_scores: dict[str, list[int]] = {m: [] for m in LIKERT_METRICS}
-    ordinal_scores: dict[str, list[int]] = {m: [] for m in ORDINAL_METRICS}
-    all_fihs: list[list[dict]] = []
-
-    for run in runs:
-        for metric in LIKERT_METRICS:
-            entry = run.get(metric, {})
-            score = entry.get("score", 3)
-            likert_scores[metric].append(score)
-
-        for metric in ORDINAL_METRICS:
-            entry = run.get(metric, {})
-            score = entry.get("score", 2)
-            ordinal_scores[metric].append(score)
-
-        all_fihs.append(run.get("fih_detected", []))
-
+def _extract_metrics(run: dict, selected_metrics: list[str]) -> dict:
+    """Extract typed metric results from a single LLM judge run for selected metrics only."""
     result: dict = {}
 
-    # Aggregate Likert metrics
-    for metric in LIKERT_METRICS:
-        scores = likert_scores[metric]
-        median_idx = select_median_run_index(scores)
-        median_run = runs[median_idx]
-        entry = median_run.get(metric, {})
-        aggregated_score = aggregate_likert_scores(scores)
+    likert_metrics = [
+        "clinical_accuracy",
+        "completeness",
+        "safety_completeness",
+        "relevance",
+        "coherence",
+        "evidence_traceability",
+    ]
 
+    for metric in likert_metrics:
+        if metric not in selected_metrics:
+            continue
+        entry = run.get(metric, {})
         if metric == "safety_completeness":
             result[metric] = SafetyMetricResult(
-                score=aggregated_score,
+                score=entry.get("score", 3),
                 confidence=entry.get("confidence", "medium"),
                 reasoning=entry.get("reasoning", ""),
                 missing_items=entry.get("missing_items", []),
             )
         elif metric == "evidence_traceability":
             result[metric] = TraceabilityMetricResult(
-                score=aggregated_score,
+                score=entry.get("score", 3),
                 confidence=entry.get("confidence", "medium"),
                 reasoning=entry.get("reasoning", ""),
                 untraced_claims=entry.get("untraced_claims", []),
             )
         else:
             result[metric] = MetricResult(
-                score=aggregated_score,
+                score=entry.get("score", 3),
                 confidence=entry.get("confidence", "medium"),
                 reasoning=entry.get("reasoning", ""),
             )
 
-    # Aggregate ordinal metrics
-    for metric in ORDINAL_METRICS:
-        scores = ordinal_scores[metric]
-        median_idx = select_median_run_index(scores)
-        median_run = runs[median_idx]
-        entry = median_run.get(metric, {})
-        aggregated_score = aggregate_likert_scores(scores)
-
-        result[metric] = MetricResult(
-            score=aggregated_score,
-            confidence=entry.get("confidence", "medium"),
-            reasoning=entry.get("reasoning", ""),
+    if "hallucination_score" in selected_metrics:
+        hal_entry = run.get("hallucination_score", {})
+        result["hallucination_score"] = MetricResult(
+            score=hal_entry.get("score", 2),
+            confidence=hal_entry.get("confidence", "medium"),
+            reasoning=hal_entry.get("reasoning", ""),
         )
 
-    # Aggregate FIH detections via majority voting
-    result["fih_detected"] = aggregate_fih_detections(all_fihs, num_runs)
+    if "fih_detected" in selected_metrics:
+        fih_list = run.get("fih_detected", [])
+        result["fih_detected"] = [
+            FIHItem(
+                claim=fih.get("claim", ""),
+                source_says=fih.get("source_says", ""),
+                severity=fih.get("severity", "minor"),
+                location=fih.get("location", ""),
+            )
+            for fih in fih_list
+        ]
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Section-wise evaluation pipeline
+# ---------------------------------------------------------------------------
+
+
+async def run_section_evaluation(
+    request: SectionEvaluationRequest,
+) -> SectionEvaluationResponse:
+    """Run section-wise evaluation pipeline.
+
+    Flow: resolve input → per-section retrieval → per-section LLM evaluation → aggregate.
+    """
+    evaluation_id = str(uuid.uuid4())
+    start_time = time.monotonic()
+    selected_metrics = list(request.metrics)
+
+    # Step 1: Resolve input to normalized ReportJSON
+    report: ReportJSON = await resolve_to_json(request)
+
+    logger.info(
+        "section_evaluation_start",
+        report_id=report.report_id,
+        evaluation_id=evaluation_id,
+        num_sections=len(report.sections),
+        metrics=selected_metrics,
+    )
+
+    # Step 2: Evaluate each section independently
+    section_results: list[SectionScore] = []
+    section_metric_dicts: list[dict] = []
+
+    for section in report.sections:
+        section_dict = section.model_dump()
+
+        # Section-specific retrieval
+        retrieved_chunks = await retrieve_for_section(section_dict, top_k=5)
+
+        if not retrieved_chunks:
+            logger.warning(
+                "section_no_chunks",
+                section_id=section.id,
+                section_title=section.title,
+            )
+            # Still evaluate — the LLM should note lack of evidence
+            # Use empty chunks rather than skipping
+
+        # Build section-level prompts
+        system_prompt = build_section_system_prompt(selected_metrics)
+        formatted = format_chunks(retrieved_chunks)
+        user_prompt = build_section_user_prompt(
+            section_title=section.title,
+            section_type=section.section_type,
+            section_content=section.content,
+            formatted_chunks=formatted,
+            guideline_topic=request.guideline_topic,
+            disease_context=request.disease_context,
+        )
+
+        # Call LLM judge for this section
+        try:
+            raw_result = await call_llm_judge(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                deployment=request.evaluation_model,
+                report_id=report.report_id,
+                run_index=section.order,
+            )
+        except Exception as e:
+            logger.error(
+                "section_evaluation_failed",
+                section_id=section.id,
+                error=str(e),
+            )
+            raise RuntimeError(
+                f"Section evaluation failed for section '{section.title}': {e}"
+            )
+
+        # Extract typed metrics for this section
+        metrics_dict = _extract_metrics(raw_result, selected_metrics)
+
+        # Build SectionScore
+        section_score = SectionScore(
+            section_id=section.id,
+            section_title=section.title,
+            section_type=section.section_type,
+            clinical_accuracy=metrics_dict.get("clinical_accuracy"),
+            completeness=metrics_dict.get("completeness"),
+            safety_completeness=metrics_dict.get("safety_completeness"),
+            relevance=metrics_dict.get("relevance"),
+            coherence=metrics_dict.get("coherence"),
+            evidence_traceability=metrics_dict.get("evidence_traceability"),
+            hallucination_score=metrics_dict.get("hallucination_score"),
+            fih_detected=metrics_dict.get("fih_detected"),
+            flags=generate_flags(
+                safety=metrics_dict.get("safety_completeness"),
+                traceability=metrics_dict.get("evidence_traceability"),
+                hallucination=metrics_dict.get("hallucination_score"),
+                fih_detected=metrics_dict.get("fih_detected"),
+                clinical_accuracy=metrics_dict.get("clinical_accuracy"),
+            ),
+        )
+        section_results.append(section_score)
+
+        # Keep dict for aggregation, with content length for optional weighting
+        metrics_dict["_content_length"] = len(section.content)
+        section_metric_dicts.append(metrics_dict)
+
+        logger.info(
+            "section_evaluated",
+            section_id=section.id,
+            section_title=section.title,
+        )
+
+    # Step 3: Aggregate scores across sections
+    final_scores = aggregate_section_scores(
+        section_metric_dicts, selected_metrics
+    )
+
+    # Collect all flags from all sections (deduplicated)
+    all_flags = list(
+        dict.fromkeys(
+            flag for ss in section_results for flag in ss.flags
+        )
+    )
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    response = SectionEvaluationResponse(
+        report_id=report.report_id,
+        evaluation_id=evaluation_id,
+        timestamp=timestamp,
+        evaluation_model=request.evaluation_model,
+        metrics_evaluated=selected_metrics,
+        final_scores=final_scores,
+        section_scores=section_results,
+        confidence_level="high",
+        flags=all_flags,
+        cosmos_document_id=evaluation_id,
+    )
+
+    # Store in Cosmos DB
+    cosmos_doc = response.model_dump()
+    cosmos_doc["id"] = evaluation_id
+    cosmos_doc["report_id"] = report.report_id
+
+    try:
+        await cosmos_service.store_evaluation(cosmos_doc)
+    except Exception as e:
+        logger.error(
+            "cosmos_store_failed",
+            evaluation_id=evaluation_id,
+            error=str(e),
+        )
+
+    # Store in Blob Storage
+    try:
+        blob_url = await blob_service.store_evaluation_report(
+            report_id=report.report_id,
+            evaluation_id=evaluation_id,
+            data=cosmos_doc,
+        )
+        response.blob_url = blob_url
+    except Exception as e:
+        logger.error(
+            "blob_store_failed",
+            evaluation_id=evaluation_id,
+            error=str(e),
+        )
+
+    elapsed = round(time.monotonic() - start_time, 2)
+    logger.info(
+        "section_evaluation_complete",
+        report_id=report.report_id,
+        evaluation_id=evaluation_id,
+        num_sections=len(section_results),
+        elapsed_seconds=elapsed,
+    )
+
+    return response

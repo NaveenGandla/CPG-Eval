@@ -3,10 +3,10 @@
 import structlog
 from fastapi import APIRouter, HTTPException
 
-from app.models.requests import EvaluationRequest
-from app.models.responses import EvaluationResponse
+from app.models.requests import EvaluationRequest, SectionEvaluationRequest
+from app.models.responses import EvaluationResponse, SectionEvaluationResponse
 from app.services import cosmos_service
-from app.services.evaluation_engine import run_evaluation
+from app.services.evaluation_engine import run_evaluation, run_section_evaluation
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/v1/evaluate", tags=["evaluation"])
@@ -16,11 +16,11 @@ router = APIRouter(prefix="/api/v1/evaluate", tags=["evaluation"])
     "",
     response_model=EvaluationResponse,
     status_code=200,
-    summary="Evaluate a CPG report",
-    description="Run LLM-as-judge evaluation on a generated CPG report with majority voting.",
+    summary="Evaluate a CPG report (full document mode)",
+    description="Run LLM-as-judge evaluation on a generated CPG report against source evidence.",
 )
 async def evaluate_report(request: EvaluationRequest) -> EvaluationResponse:
-    """Evaluate a generated CPG report against source evidence."""
+    """Evaluate a generated CPG report against source evidence (full document mode)."""
     try:
         result = await run_evaluation(request)
         return result
@@ -38,6 +38,43 @@ async def evaluate_report(request: EvaluationRequest) -> EvaluationResponse:
         raise HTTPException(
             status_code=500,
             detail=f"Evaluation failed: {error_msg}",
+        )
+
+
+@router.post(
+    "/sections",
+    response_model=SectionEvaluationResponse,
+    status_code=200,
+    summary="Evaluate a CPG report (section-wise mode)",
+    description=(
+        "Run section-wise LLM-as-judge evaluation. "
+        "Accepts inline JSON, blob path to JSON, or blob path to PDF/DOCX. "
+        "Each section is evaluated independently with section-specific retrieval."
+    ),
+)
+async def evaluate_report_sections(
+    request: SectionEvaluationRequest,
+) -> SectionEvaluationResponse:
+    """Evaluate a CPG report section-by-section."""
+    try:
+        result = await run_section_evaluation(request)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except RuntimeError as e:
+        logger.error("section_evaluation_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        error_msg = str(e)
+        if "429" in error_msg or "throttl" in error_msg.lower():
+            raise HTTPException(
+                status_code=503,
+                detail="Azure OpenAI service is throttled. Please retry later.",
+            )
+        logger.error("section_evaluation_error", error=error_msg)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Section evaluation failed: {error_msg}",
         )
 
 

@@ -7,7 +7,6 @@ from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from openai import AsyncAzureOpenAI
 
 from app.config import settings
-from app.prompts.evaluation_prompts import SYSTEM_PROMPT
 
 logger = structlog.get_logger()
 
@@ -31,6 +30,7 @@ def get_openai_client() -> AsyncAzureOpenAI:
 
 
 async def call_llm_judge(
+    system_prompt: str,
     user_prompt: str,
     deployment: str,
     report_id: str,
@@ -64,7 +64,7 @@ async def call_llm_judge(
             response = await client.chat.completions.create(
                 model=deployment,
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.3,
