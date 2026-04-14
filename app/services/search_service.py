@@ -69,12 +69,15 @@ async def enrich_chunks(
 
 
 async def retrieve_for_section(
-    section: dict, top_k: int = 5
+    section: dict,
+    top_k: int = 5,
+    disease_context: str = "",
+    guideline_topic: str = "",
 ) -> list[SourceChunk]:
     """Retrieve source chunks specific to a single report section.
 
-    Builds a targeted query from the section title and keywords.
-    No global document queries — retrieval is section-specific.
+    Builds a targeted query from the section title, keywords, and
+    the broader disease/guideline context for improved relevance.
     """
     if not settings.search_endpoint:
         logger.warning("search_not_configured")
@@ -82,7 +85,20 @@ async def retrieve_for_section(
 
     title = section.get("title", "")
     keywords = section.get("keywords", [])
-    search_query = f"{title} | {' '.join(keywords)}"
+
+    # Build a richer query: context terms first (boost relevance),
+    # then section title and keywords
+    query_parts: list[str] = []
+    if disease_context:
+        query_parts.append(disease_context)
+    if guideline_topic:
+        query_parts.append(guideline_topic)
+    if title:
+        query_parts.append(title)
+    if keywords:
+        query_parts.append(" ".join(keywords))
+
+    search_query = " ".join(query_parts)
 
     client = get_search_client()
     logger.info(
@@ -96,6 +112,7 @@ async def retrieve_for_section(
     results = await client.search(
         search_text=search_query,
         top=top_k,
+        search_mode="all",
     )
 
     async for result in results:

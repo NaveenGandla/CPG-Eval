@@ -46,6 +46,23 @@ def generate_flags(
     return flags
 
 
+def aggregate_confidence_level(metric_results: list) -> str:
+    """Derive overall confidence from a flat list of MetricResult-like objects.
+
+    - "low"    if any metric is low
+    - "medium" if any metric is medium (and none are low)
+    - "high"   if all metrics are high
+    """
+    levels = [r.confidence for r in metric_results if hasattr(r, "confidence")]
+    if not levels:
+        return "high"
+    if "low" in levels:
+        return "low"
+    if "medium" in levels:
+        return "medium"
+    return "high"
+
+
 def aggregate_section_scores(
     section_scores: list[dict],
     metrics: list[str],

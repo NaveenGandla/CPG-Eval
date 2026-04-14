@@ -105,7 +105,8 @@ class ReportSection(BaseModel):
     )
     order: int = Field(..., description="Order of section in the document")
     keywords: list[str] = Field(
-        default_factory=list, description="Top keywords for retrieval"
+        default_factory=list,
+        description="Top keywords for retrieval. Auto-generated via TF-IDF if not provided.",
     )
 
 
@@ -170,7 +171,6 @@ class SectionEvaluationRequest(BaseModel):
                                 "content": "This guideline covers...",
                                 "section_type": "general",
                                 "order": 0,
-                                "keywords": ["NDMM", "treatment"],
                             }
                         ],
                     },

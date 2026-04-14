@@ -32,7 +32,7 @@ from app.services import blob_service, cosmos_service
 from app.services.input_resolver import resolve_to_json
 from app.services.llm_judge import call_llm_judge
 from app.services.search_service import enrich_chunks, retrieve_for_section
-from app.utils.scoring import aggregate_section_scores, generate_flags
+from app.utils.scoring import aggregate_confidence_level, aggregate_section_scores, generate_flags
 
 logger = structlog.get_logger()
 
@@ -97,7 +97,9 @@ async def run_evaluation(request: EvaluationRequest) -> EvaluationResponse:
     # Extract only the selected metrics from the LLM result
     result = _extract_metrics(raw_result, selected_metrics)
 
-    confidence = "high"
+    confidence = aggregate_confidence_level(
+        [v for v in result.values() if hasattr(v, "confidence")]
+    )
 
     flags = generate_flags(
         safety=result.get("safety_completeness"),
@@ -269,7 +271,12 @@ async def run_section_evaluation(
         section_dict = section.model_dump()
 
         # Section-specific retrieval
-        retrieved_chunks = await retrieve_for_section(section_dict, top_k=5)
+        retrieved_chunks = await retrieve_for_section(
+            section_dict,
+            top_k=5,
+            disease_context=request.disease_context,
+            guideline_topic=request.guideline_topic,
+        )
 
         if not retrieved_chunks:
             logger.warning(
@@ -359,6 +366,15 @@ async def run_section_evaluation(
         )
     )
 
+    # Derive confidence from all per-section metric results
+    all_metric_results = [
+        getattr(ss, metric)
+        for ss in section_results
+        for metric in selected_metrics
+        if getattr(ss, metric, None) is not None and hasattr(getattr(ss, metric), "confidence")
+    ]
+    confidence = aggregate_confidence_level(all_metric_results)
+
     timestamp = datetime.now(timezone.utc).isoformat()
 
     response = SectionEvaluationResponse(
@@ -369,7 +385,7 @@ async def run_section_evaluation(
         metrics_evaluated=selected_metrics,
         final_scores=final_scores,
         section_scores=section_results,
-        confidence_level="high",
+        confidence_level=confidence,
         flags=all_flags,
         cosmos_document_id=evaluation_id,
     )

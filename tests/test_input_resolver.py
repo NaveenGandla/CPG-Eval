@@ -29,6 +29,27 @@ def inline_report_json() -> ReportJSON:
     )
 
 
+@pytest.fixture
+def inline_report_no_keywords() -> ReportJSON:
+    return ReportJSON(
+        report_id="rpt-no-kw-001",
+        sections=[
+            ReportSection(
+                id="sec-1",
+                title="Treatment Recommendations",
+                content=(
+                    "D-VRd is recommended as first-line therapy for transplant-eligible patients. "
+                    "The GRIFFIN trial demonstrated an overall response rate of 99%. "
+                    "Bortezomib-based regimens remain the standard of care for newly diagnosed "
+                    "multiple myeloma patients who are eligible for autologous stem cell transplant."
+                ),
+                section_type="guideline",
+                order=0,
+            ),
+        ],
+    )
+
+
 @pytest.mark.asyncio
 class TestResolveToJson:
     async def test_inline_json(self, inline_report_json):
@@ -82,3 +103,24 @@ class TestResolveToJson:
         )
         result = await resolve_to_json(request)
         assert result.report_id == "rpt-inline-001"
+
+    async def test_auto_generates_keywords_when_missing(self, inline_report_no_keywords):
+        """Keywords are auto-generated via TF-IDF when not provided in JSON."""
+        request = SectionEvaluationRequest(
+            guideline_topic="Treatment",
+            disease_context="MM",
+            report_json=inline_report_no_keywords,
+        )
+        result = await resolve_to_json(request)
+        section = result.sections[0]
+        assert len(section.keywords) > 0, "Keywords should be auto-generated"
+
+    async def test_preserves_user_provided_keywords(self, inline_report_json):
+        """User-provided keywords are not overwritten."""
+        request = SectionEvaluationRequest(
+            guideline_topic="Treatment",
+            disease_context="MM",
+            report_json=inline_report_json,
+        )
+        result = await resolve_to_json(request)
+        assert result.sections[0].keywords == ["test"]

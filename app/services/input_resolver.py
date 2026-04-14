@@ -10,6 +10,7 @@ from app.config import settings
 from app.models.requests import ReportJSON, ReportSection, SectionEvaluationRequest
 from app.services.document_intelligence import extract_from_blob
 from app.services.section_builder import build_sections
+from app.utils.keyword_extraction import extract_keywords
 
 logger = structlog.get_logger()
 
@@ -27,11 +28,14 @@ async def resolve_to_json(request: SectionEvaluationRequest) -> ReportJSON:
             "input_resolve_inline_json",
             report_id=request.report_json.report_id,
         )
+        _enrich_missing_keywords(request.report_json)
         return request.report_json
 
     if request.json_path is not None:
         logger.info("input_resolve_blob_json", json_path=request.json_path)
-        return await _load_json_from_blob(request.json_path)
+        report = await _load_json_from_blob(request.json_path)
+        _enrich_missing_keywords(report)
+        return report
 
     if request.file_path is not None:
         logger.info("input_resolve_document", file_path=request.file_path)
@@ -40,6 +44,26 @@ async def resolve_to_json(request: SectionEvaluationRequest) -> ReportJSON:
     raise ValueError(
         "No input provided. Supply one of: report_json, json_path, or file_path."
     )
+
+
+def _enrich_missing_keywords(report: ReportJSON) -> None:
+    """Auto-generate TF-IDF keywords for sections that don't have them.
+
+    Mutates sections in-place so the same extraction used for PDF inputs
+    is applied consistently to JSON inputs.
+    """
+    enriched = 0
+    for section in report.sections:
+        if not section.keywords:
+            section.keywords = extract_keywords(section.content, top_n=10)
+            enriched += 1
+
+    if enriched:
+        logger.info(
+            "keywords_enriched",
+            report_id=report.report_id,
+            sections_enriched=enriched,
+        )
 
 
 async def _load_json_from_blob(blob_path: str) -> ReportJSON:
