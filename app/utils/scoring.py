@@ -1,108 +1,78 @@
 """Flag generation based on evaluation results."""
 
-from app.models.responses import (
-    FIHItem,
-    MetricResult,
-    SafetyMetricResult,
-    TraceabilityMetricResult,
-)
+from app.models.responses import LikertMetricResult, PercentageMetricResult
+
+# Thresholds for percentage metrics (below this → flag)
+PERCENTAGE_THRESHOLDS: dict[str, tuple[str, float]] = {
+    "accuracy": ("low_accuracy", 60.0),
+    "hallucinations": ("high_hallucination_rate", 70.0),
+    "consistency": ("inconsistencies_detected", 80.0),
+    "source_traceability": ("poor_source_traceability", 60.0),
+}
+
+# Thresholds for Likert metrics (below this → flag)
+LIKERT_THRESHOLDS: dict[str, tuple[str, float]] = {
+    "coherence": ("low_coherence", 2.0),
+    "clinical_relevance": ("low_clinical_relevance", 2.0),
+    "bias": ("bias_detected", 2.0),
+    "transparency": ("low_transparency", 2.0),
+}
 
 
 def generate_flags(
-    safety: SafetyMetricResult | None,
-    traceability: TraceabilityMetricResult | None,
-    hallucination: MetricResult | None,
-    fih_detected: list[FIHItem] | None,
-    clinical_accuracy: MetricResult | None,
+    accuracy: PercentageMetricResult | None = None,
+    hallucinations: PercentageMetricResult | None = None,
+    consistency: PercentageMetricResult | None = None,
+    source_traceability: PercentageMetricResult | None = None,
+    coherence: LikertMetricResult | None = None,
+    clinical_relevance: LikertMetricResult | None = None,
+    bias: LikertMetricResult | None = None,
+    transparency: LikertMetricResult | None = None,
 ) -> list[str]:
-    """Generate warning flags based on evaluated metrics. Skips checks for None metrics."""
+    """Generate warning flags based on metric scores and thresholds."""
     flags: list[str] = []
 
-    if safety is not None:
-        if safety.score <= 2:
-            flags.append("missing_safety_data")
-        if safety.missing_items:
-            flags.append("safety_gaps_identified")
+    percentage_results = {
+        "accuracy": accuracy,
+        "hallucinations": hallucinations,
+        "consistency": consistency,
+        "source_traceability": source_traceability,
+    }
 
-    if traceability is not None:
-        if traceability.score <= 2:
-            flags.append("poor_evidence_traceability")
-        if traceability.untraced_claims:
-            flags.append("untraced_claims_present")
+    likert_results = {
+        "coherence": coherence,
+        "clinical_relevance": clinical_relevance,
+        "bias": bias,
+        "transparency": transparency,
+    }
 
-    if hallucination is not None and hallucination.score <= 2:
-        flags.append("hallucinations_detected")
+    # Check percentage metrics
+    for metric_name, result in percentage_results.items():
+        if result is None:
+            continue
+        flag_name, threshold = PERCENTAGE_THRESHOLDS[metric_name]
+        if result.score < threshold:
+            flags.append(flag_name)
 
-    if fih_detected is not None:
-        critical_fihs = [f for f in fih_detected if f.severity == "critical"]
-        if critical_fihs:
-            flags.append("critical_fih_detected")
-        if fih_detected:
-            flags.append("fih_present")
+    # Check Likert metrics
+    for metric_name, result in likert_results.items():
+        if result is None:
+            continue
+        flag_name, threshold = LIKERT_THRESHOLDS[metric_name]
+        if result.score < threshold:
+            flags.append(flag_name)
 
-    if clinical_accuracy is not None and clinical_accuracy.score <= 2:
-        flags.append("low_clinical_accuracy")
+    # Drill into sub-question details for critical flags
+    if accuracy is not None:
+        for sq in accuracy.sub_questions:
+            if sq.sub_question_id == "accuracy_drug_dosages" and sq.percentage < 50.0:
+                flags.append("critical_dosage_accuracy_issue")
+            if sq.sub_question_id == "accuracy_drug_interactions" and sq.percentage < 50.0:
+                flags.append("critical_drug_interaction_issue")
+
+    if hallucinations is not None:
+        for sq in hallucinations.sub_questions:
+            if sq.sub_question_id == "hallucination_fake_citations" and sq.percentage < 50.0:
+                flags.append("fake_citations_detected")
 
     return flags
-
-
-def aggregate_confidence_level(metric_results: list) -> str:
-    """Derive overall confidence from a flat list of MetricResult-like objects.
-
-    - "low"    if any metric is low
-    - "medium" if any metric is medium (and none are low)
-    - "high"   if all metrics are high
-    """
-    levels = [r.confidence for r in metric_results if hasattr(r, "confidence")]
-    if not levels:
-        return "high"
-    if "low" in levels:
-        return "low"
-    if "medium" in levels:
-        return "medium"
-    return "high"
-
-
-def aggregate_section_scores(
-    section_scores: list[dict],
-    metrics: list[str],
-    weight_by_length: bool = False,
-) -> dict[str, float]:
-    """Aggregate metric scores across sections.
-
-    Args:
-        section_scores: List of dicts, each with metric keys mapping to MetricResult-like objects.
-        metrics: List of metric names to aggregate.
-        weight_by_length: If True, weight scores by section content length.
-
-    Returns:
-        Dict of metric_name -> aggregated float score.
-    """
-    # Metrics that have numeric scores (exclude fih_detected which is a list)
-    scored_metrics = [m for m in metrics if m != "fih_detected"]
-
-    if not section_scores:
-        return {}
-
-    aggregated: dict[str, float] = {}
-
-    for metric in scored_metrics:
-        scores = []
-        weights = []
-        for section in section_scores:
-            result = section.get(metric)
-            if result is not None and hasattr(result, "score"):
-                scores.append(result.score)
-                weights.append(section.get("_content_length", 1))
-
-        if not scores:
-            continue
-
-        if weight_by_length and sum(weights) > 0:
-            total_weight = sum(weights)
-            weighted_sum = sum(s * w for s, w in zip(scores, weights))
-            aggregated[metric] = round(weighted_sum / total_weight, 2)
-        else:
-            aggregated[metric] = round(sum(scores) / len(scores), 2)
-
-    return aggregated
