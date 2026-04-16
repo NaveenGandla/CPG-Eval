@@ -7,6 +7,14 @@ from app.models.requests import (
     SourceChunk,
     SourceChunkMetadata,
 )
+from app.models.responses import (
+    ClaimVerdict,
+    ExtractedClaim,
+    LikertMetricResult,
+    LikertSubQuestionScore,
+    PercentageMetricResult,
+    SubQuestionResult,
+)
 
 
 @pytest.fixture
@@ -40,52 +48,84 @@ def sample_request() -> EvaluationRequest:
         ),
         guideline_topic="First-line treatment for transplant-eligible NDMM",
         disease_context="Multiple Myeloma",
-        model="gpt-4o",
     )
 
 
 @pytest.fixture
-def sample_llm_judge_result() -> dict:
-    """A single LLM judge evaluation result (all 8 metrics)."""
-    return {
-        "clinical_accuracy": {
-            "score": 4,
-            "confidence": "high",
-            "reasoning": "Clinical facts verified.",
-        },
-        "completeness": {
-            "score": 3,
-            "confidence": "medium",
-            "reasoning": "Covers main findings but misses comparator data.",
-        },
-        "safety_completeness": {
-            "score": 2,
-            "confidence": "medium",
-            "reasoning": "Safety data is superficial.",
-            "missing_items": ["Grade 3-4 AE rates", "Black box warnings"],
-        },
-        "relevance": {
-            "score": 5,
-            "confidence": "high",
-            "reasoning": "All content on-topic.",
-        },
-        "coherence": {
-            "score": 4,
-            "confidence": "high",
-            "reasoning": "Well-structured document.",
-        },
-        "evidence_traceability": {
-            "score": 3,
-            "confidence": "medium",
-            "reasoning": "Some claims lack attribution.",
-            "untraced_claims": [
-                {"claim": "ORR was 99%", "location": "paragraph 1"}
-            ],
-        },
-        "hallucination_score": {
-            "score": 3,
-            "confidence": "high",
-            "reasoning": "No major hallucinations detected.",
-        },
-        "fih_detected": [],
-    }
+def sample_percentage_result() -> PercentageMetricResult:
+    return PercentageMetricResult(
+        score=75.0,
+        sub_questions=[
+            SubQuestionResult(
+                sub_question_id="accuracy_drug_dosages",
+                sub_question_text="Are drug dosages correct?",
+                claims_extracted=[
+                    ExtractedClaim(
+                        claim_id="c1",
+                        claim_text="Lenalidomide 25 mg daily",
+                        location="Section 3",
+                    )
+                ],
+                verifications=[
+                    ClaimVerdict(
+                        claim_id="c1",
+                        verdict="correct",
+                        reasoning="Matches source.",
+                        evidence_chunk_id="chunk-1",
+                    )
+                ],
+                correct_count=1,
+                total_count=1,
+                percentage=100.0,
+            ),
+            SubQuestionResult(
+                sub_question_id="accuracy_lab_ranges",
+                sub_question_text="Are lab ranges correct?",
+                claims_extracted=[
+                    ExtractedClaim(claim_id="c1", claim_text="eGFR > 30", location="Section 2"),
+                    ExtractedClaim(claim_id="c2", claim_text="Platelets > 100k", location="Section 2"),
+                ],
+                verifications=[
+                    ClaimVerdict(claim_id="c1", verdict="correct", reasoning="OK"),
+                    ClaimVerdict(claim_id="c2", verdict="incorrect", reasoning="Should be >75k"),
+                ],
+                correct_count=1,
+                total_count=2,
+                percentage=50.0,
+            ),
+        ],
+    )
+
+
+@pytest.fixture
+def sample_likert_result() -> LikertMetricResult:
+    return LikertMetricResult(
+        score=3.25,
+        sub_questions=[
+            LikertSubQuestionScore(
+                sub_question_id="coherence_pathway_alignment",
+                sub_question_text="Pathway aligns with recommendations.",
+                score=3,
+                reasoning="Mostly aligned.",
+            ),
+            LikertSubQuestionScore(
+                sub_question_id="coherence_sections",
+                sub_question_text="Sections support each other.",
+                score=4,
+                reasoning="Strong coherence.",
+            ),
+            LikertSubQuestionScore(
+                sub_question_id="coherence_terminology",
+                sub_question_text="Terminology is consistent.",
+                score=3,
+                reasoning="Minor inconsistencies.",
+            ),
+            LikertSubQuestionScore(
+                sub_question_id="coherence_unified",
+                sub_question_text="Reads as unified guideline.",
+                score=3,
+                reasoning="Mostly unified.",
+            ),
+        ],
+        overall_reasoning="Document is well structured with minor gaps.",
+    )

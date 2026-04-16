@@ -26,9 +26,11 @@ structlog.configure(
 app = FastAPI(
     title="M42 CPG Report Evaluation API",
     description=(
-        "Evaluates LLM-generated Clinical Practice Guideline reports for "
-        "clinical accuracy, safety, hallucinations, and evidence traceability "
-        "using an LLM-as-judge pattern with majority voting."
+        "Evaluates LLM-generated Clinical Practice Guideline reports across "
+        "8 metrics: accuracy, hallucinations, consistency, source traceability "
+        "(percentage-based 0-100%), and coherence, clinical relevance, bias, "
+        "transparency (Likert 1-4). Uses claim-level verification with "
+        "per-claim retrieval for percentage metrics."
     ),
     version="1.0.0",
 )

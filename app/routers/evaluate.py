@@ -3,10 +3,10 @@
 import structlog
 from fastapi import APIRouter, HTTPException
 
-from app.models.requests import EvaluationRequest, SectionEvaluationRequest
-from app.models.responses import EvaluationResponse, SectionEvaluationResponse
+from app.models.requests import EvaluationRequest
+from app.models.responses import EvaluationResponse
 from app.services import cosmos_service
-from app.services.evaluation_engine import run_evaluation, run_section_evaluation
+from app.services.evaluation_engine import run_evaluation
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/v1/evaluate", tags=["evaluation"])
@@ -16,16 +16,21 @@ router = APIRouter(prefix="/api/v1/evaluate", tags=["evaluation"])
     "",
     response_model=EvaluationResponse,
     status_code=200,
-    summary="Evaluate a CPG report (full document mode)",
-    description="Run LLM-as-judge evaluation on a generated CPG report against source evidence.",
+    summary="Evaluate a CPG report",
+    description=(
+        "Run LLM-as-judge evaluation on a generated CPG report against source evidence. "
+        "Supports 8 metrics: accuracy, hallucinations, consistency, source_traceability "
+        "(percentage-based 0-100%), and coherence, clinical_relevance, bias, transparency "
+        "(Likert 1-4)."
+    ),
 )
 async def evaluate_report(request: EvaluationRequest) -> EvaluationResponse:
-    """Evaluate a generated CPG report against source evidence (full document mode)."""
+    """Evaluate a generated CPG report against source evidence."""
     try:
         result = await run_evaluation(request)
         return result
     except RuntimeError as e:
-        logger.error("evaluation_all_runs_failed", error=str(e))
+        logger.error("evaluation_failed", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         error_msg = str(e)
@@ -41,46 +46,8 @@ async def evaluate_report(request: EvaluationRequest) -> EvaluationResponse:
         )
 
 
-@router.post(
-    "/sections",
-    response_model=SectionEvaluationResponse,
-    status_code=200,
-    summary="Evaluate a CPG report (section-wise mode)",
-    description=(
-        "Run section-wise LLM-as-judge evaluation. "
-        "Accepts inline JSON, blob path to JSON, or blob path to PDF/DOCX. "
-        "Each section is evaluated independently with section-specific retrieval."
-    ),
-)
-async def evaluate_report_sections(
-    request: SectionEvaluationRequest,
-) -> SectionEvaluationResponse:
-    """Evaluate a CPG report section-by-section."""
-    try:
-        result = await run_section_evaluation(request)
-        return result
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except RuntimeError as e:
-        logger.error("section_evaluation_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        error_msg = str(e)
-        if "429" in error_msg or "throttl" in error_msg.lower():
-            raise HTTPException(
-                status_code=503,
-                detail="Azure OpenAI service is throttled. Please retry later.",
-            )
-        logger.error("section_evaluation_error", error=error_msg)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Section evaluation failed: {error_msg}",
-        )
-
-
 @router.get(
     "/{evaluation_id}",
-    response_model=EvaluationResponse,
     summary="Get evaluation by ID",
     description="Retrieve a stored evaluation from Cosmos DB by evaluation_id.",
 )
@@ -106,7 +73,6 @@ async def get_evaluation(evaluation_id: str) -> dict:
 
 @router.get(
     "/report/{report_id}",
-    response_model=list[EvaluationResponse],
     summary="Get evaluations by report ID",
     description="Retrieve all evaluations for a given report_id.",
 )

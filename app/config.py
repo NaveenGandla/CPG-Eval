@@ -19,15 +19,16 @@ class Settings(BaseSettings):
     # Azure Blob Storage
     blob_account_url: str = ""
     blob_container_name: str = "evaluation-reports"
-    blob_json_container_name: str = "cpg-report-json"
-
-    # Azure Document Intelligence
-    document_intelligence_endpoint: str = ""
 
     # App Settings
     default_evaluation_model: str = "gpt-4o"
     log_level: str = "INFO"
-    use_section_mode: bool = True
+
+    # Evaluation pipeline tuning
+    claim_verification_batch_size: int = 5
+    percentage_metric_top_k: int = 5
+    likert_metric_top_k: int = 15
+    max_concurrent_llm_calls: int = 10
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

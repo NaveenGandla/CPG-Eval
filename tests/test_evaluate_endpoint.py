@@ -8,10 +8,9 @@ from httpx import ASGITransport, AsyncClient
 from app.main import app
 from app.models.responses import (
     EvaluationResponse,
-    FIHItem,
-    MetricResult,
-    SafetyMetricResult,
-    TraceabilityMetricResult,
+    LikertMetricResult,
+    LikertSubQuestionScore,
+    PercentageMetricResult,
 )
 
 
@@ -32,40 +31,35 @@ def mock_evaluation_response() -> EvaluationResponse:
         evaluation_id="eval-123",
         timestamp="2025-01-15T10:30:00Z",
         evaluation_model="gpt-4o",
-        num_runs=1,
         metrics_evaluated=[
-            "clinical_accuracy",
-            "completeness",
-            "safety_completeness",
-            "relevance",
+            "accuracy",
+            "hallucinations",
+            "consistency",
+            "source_traceability",
             "coherence",
-            "evidence_traceability",
-            "hallucination_score",
-            "fih_detected",
+            "clinical_relevance",
+            "bias",
+            "transparency",
         ],
-        clinical_accuracy=MetricResult(
-            score=4, confidence="high", reasoning="Good"
+        accuracy=PercentageMetricResult(score=85.0),
+        hallucinations=PercentageMetricResult(score=90.0),
+        consistency=PercentageMetricResult(score=95.0),
+        source_traceability=PercentageMetricResult(score=80.0),
+        coherence=LikertMetricResult(
+            score=3.5,
+            sub_questions=[
+                LikertSubQuestionScore(
+                    sub_question_id="coherence_pathway_alignment",
+                    sub_question_text="Pathway aligns.",
+                    score=4,
+                    reasoning="Good.",
+                )
+            ],
+            overall_reasoning="Well structured.",
         ),
-        completeness=MetricResult(
-            score=3, confidence="medium", reasoning="OK"
-        ),
-        safety_completeness=SafetyMetricResult(
-            score=3, confidence="medium", reasoning="OK"
-        ),
-        relevance=MetricResult(
-            score=5, confidence="high", reasoning="Great"
-        ),
-        coherence=MetricResult(
-            score=4, confidence="high", reasoning="Good"
-        ),
-        evidence_traceability=TraceabilityMetricResult(
-            score=3, confidence="medium", reasoning="OK"
-        ),
-        hallucination_score=MetricResult(
-            score=3, confidence="high", reasoning="Clean"
-        ),
-        fih_detected=[],
-        confidence_level="high",
+        clinical_relevance=LikertMetricResult(score=3.0, overall_reasoning="OK"),
+        bias=LikertMetricResult(score=3.0, overall_reasoning="Fair"),
+        transparency=LikertMetricResult(score=3.25, overall_reasoning="Clear"),
         flags=[],
         cosmos_document_id="eval-123",
         blob_url=None,
@@ -87,7 +81,8 @@ class TestEvaluateEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["report_id"] == "rpt-001"
-        assert "clinical_accuracy" in data
+        assert "accuracy" in data
+        assert "coherence" in data
         assert "metrics_evaluated" in data
 
     @patch("app.routers.evaluate.run_evaluation")
@@ -96,7 +91,7 @@ class TestEvaluateEndpoint:
     ):
         """User can select a subset of metrics."""
         payload = valid_payload.copy()
-        payload["metrics"] = ["clinical_accuracy", "hallucination_score"]
+        payload["metrics"] = ["accuracy", "coherence"]
         mock_run.return_value = mock_evaluation_response
 
         transport = ASGITransport(app=app)
@@ -137,7 +132,7 @@ class TestEvaluateEndpoint:
 
     async def test_invalid_metric_name(self, valid_payload):
         payload = valid_payload.copy()
-        payload["metrics"] = ["clinical_accuracy", "nonexistent_metric"]
+        payload["metrics"] = ["accuracy", "nonexistent_metric"]
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -199,3 +194,15 @@ class TestGetEndpoints:
 
         assert response.status_code == 200
         assert response.json() == []
+
+    async def test_sections_endpoint_removed(self):
+        """The /sections endpoint should no longer exist."""
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/evaluate/sections",
+                json={"guideline_topic": "x", "disease_context": "y"},
+            )
+
+        # Should be 405 (method not allowed on the GET /{eval_id} route) or 422
+        assert response.status_code in (404, 405, 422)
