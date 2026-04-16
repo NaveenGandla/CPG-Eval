@@ -16,10 +16,6 @@ class Settings(BaseSettings):
     search_endpoint: str = ""
     search_index_name: str = "cpg-sources"
 
-    # Azure Blob Storage
-    blob_account_url: str = ""
-    blob_container_name: str = "evaluation-reports"
-
     # App Settings
     default_evaluation_model: str = "gpt-4o"
     log_level: str = "INFO"

@@ -86,7 +86,6 @@ class EvaluationResponse(BaseModel):
 
     # Storage references
     cosmos_document_id: str
-    blob_url: str | None = None
 
     model_config = {
         "json_schema_extra": {
@@ -143,7 +142,6 @@ class EvaluationResponse(BaseModel):
                     },
                     "flags": ["low_accuracy"],
                     "cosmos_document_id": "eval-abc-123",
-                    "blob_url": "https://account.blob.core.windows.net/evaluation-reports/rpt-001/eval-abc-123.json",
                 }
             ]
         }

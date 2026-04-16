@@ -11,7 +11,6 @@ from app.services.evaluation_engine import run_evaluation
 
 @pytest.mark.asyncio
 class TestRunEvaluation:
-    @patch("app.services.evaluation_engine.blob_service")
     @patch("app.services.evaluation_engine.cosmos_service")
     @patch("app.services.evaluation_engine.run_likert_metric")
     @patch("app.services.evaluation_engine.run_percentage_metric")
@@ -22,7 +21,6 @@ class TestRunEvaluation:
         mock_pct,
         mock_likert,
         mock_cosmos,
-        mock_blob,
         sample_request,
         sample_chunks,
         sample_percentage_result,
@@ -32,7 +30,6 @@ class TestRunEvaluation:
         mock_pct.return_value = sample_percentage_result
         mock_likert.return_value = sample_likert_result
         mock_cosmos.store_evaluation = AsyncMock(return_value="doc-id")
-        mock_blob.store_evaluation_report = AsyncMock(return_value="https://blob/report.json")
 
         result = await run_evaluation(sample_request)
 
@@ -46,7 +43,6 @@ class TestRunEvaluation:
         assert result.coherence is not None
         assert result.coherence.score == 3.25
 
-    @patch("app.services.evaluation_engine.blob_service")
     @patch("app.services.evaluation_engine.cosmos_service")
     @patch("app.services.evaluation_engine.run_likert_metric")
     @patch("app.services.evaluation_engine.run_percentage_metric")
@@ -57,7 +53,6 @@ class TestRunEvaluation:
         mock_pct,
         mock_likert,
         mock_cosmos,
-        mock_blob,
         sample_chunks,
         sample_percentage_result,
     ):
@@ -72,7 +67,6 @@ class TestRunEvaluation:
         mock_enrich.return_value = sample_chunks
         mock_pct.return_value = sample_percentage_result
         mock_cosmos.store_evaluation = AsyncMock(return_value="doc-id")
-        mock_blob.store_evaluation_report = AsyncMock(return_value=None)
 
         result = await run_evaluation(request)
 
@@ -86,7 +80,6 @@ class TestRunEvaluation:
         # No Likert metrics requested, so enrich_chunks should not be called
         mock_enrich.assert_not_called()
 
-    @patch("app.services.evaluation_engine.blob_service")
     @patch("app.services.evaluation_engine.cosmos_service")
     @patch("app.services.evaluation_engine.run_likert_metric")
     @patch("app.services.evaluation_engine.run_percentage_metric")
@@ -97,7 +90,6 @@ class TestRunEvaluation:
         mock_pct,
         mock_likert,
         mock_cosmos,
-        mock_blob,
         sample_chunks,
         sample_likert_result,
     ):
@@ -112,7 +104,6 @@ class TestRunEvaluation:
         mock_enrich.return_value = sample_chunks
         mock_likert.return_value = sample_likert_result
         mock_cosmos.store_evaluation = AsyncMock(return_value="doc-id")
-        mock_blob.store_evaluation_report = AsyncMock(return_value=None)
 
         result = await run_evaluation(request)
 
@@ -122,7 +113,6 @@ class TestRunEvaluation:
         mock_pct.assert_not_called()
         mock_enrich.assert_called_once()
 
-    @patch("app.services.evaluation_engine.blob_service")
     @patch("app.services.evaluation_engine.cosmos_service")
     @patch("app.services.evaluation_engine.run_likert_metric")
     @patch("app.services.evaluation_engine.run_percentage_metric")
@@ -133,7 +123,6 @@ class TestRunEvaluation:
         mock_pct,
         mock_likert,
         mock_cosmos,
-        mock_blob,
         sample_request,
         sample_chunks,
         sample_likert_result,
@@ -143,7 +132,6 @@ class TestRunEvaluation:
         mock_pct.side_effect = RuntimeError("LLM error")
         mock_likert.return_value = sample_likert_result
         mock_cosmos.store_evaluation = AsyncMock(return_value="doc-id")
-        mock_blob.store_evaluation_report = AsyncMock(return_value=None)
 
         result = await run_evaluation(sample_request)
 

@@ -62,7 +62,6 @@ def mock_evaluation_response() -> EvaluationResponse:
         transparency=LikertMetricResult(score=3.25, overall_reasoning="Clear"),
         flags=[],
         cosmos_document_id="eval-123",
-        blob_url=None,
     )
 
 

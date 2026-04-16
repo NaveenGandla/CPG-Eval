@@ -14,7 +14,7 @@ from app.models.responses import (
     LikertMetricResult,
     PercentageMetricResult,
 )
-from app.services import blob_service, cosmos_service
+from app.services import cosmos_service
 from app.services.claim_pipeline import run_percentage_metric
 from app.services.likert_pipeline import run_likert_metric
 from app.services.search_service import enrich_chunks
@@ -141,21 +141,6 @@ async def run_evaluation(request: EvaluationRequest) -> EvaluationResponse:
     except Exception as e:
         logger.error(
             "cosmos_store_failed",
-            evaluation_id=evaluation_id,
-            error=str(e),
-        )
-
-    # Store in Blob Storage
-    try:
-        blob_url = await blob_service.store_evaluation_report(
-            report_id=request.report_id,
-            evaluation_id=evaluation_id,
-            data=cosmos_doc,
-        )
-        response.blob_url = blob_url
-    except Exception as e:
-        logger.error(
-            "blob_store_failed",
             evaluation_id=evaluation_id,
             error=str(e),
         )
